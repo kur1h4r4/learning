@@ -444,54 +444,70 @@ BigNum<N> mod_mul(const BigNum<N>& a, const BigNum<N>& b, const BigNum<N>& m) {
 
 
 // 楕円曲線上の点
+// 無限遠点はフラグで管理
 template <size_t N>
 struct ECPoint {
     BigNum<N> x, y;
-    bool is_infinity = false; // 無限遠点フラグ
+    bool is_infinity = false;
 };
 
 // 点加算 (P + Q)
 template <size_t N>
-ECPoint<N> ec_add(const ECPoint<N>& P, const ECPoint<N>& Q, const BigNum<N>& a, const BigNum<N>& p) {
-    if (P.is_infinity) return Q;
-    if (Q.is_infinity) return P;
+ECPoint<N> ec_add(const ECPoint<N>& P, const ECPoint<N>& Q, const BigNum<N>& a, const BigNum<N>& m) {
+    // 無限遠点は単位元となる。
+    // P、Qのどちらかが無限遠点ならば、単位元を足すので、PかQをそのまま返す
+    if (P.is_infinity){
+        return Q;
+    }
+    if (Q.is_infinity){
+        return P;
+    }
 
     // x座標が同じ場合
+    // 楕円曲線の場合、x座標が同じなら、y座標は同一 or y=0対称となるかのどちらかしかない
     if (compare<N>(P.x.digits.data(), Q.x.digits.data()) == 0) {
-        // yが互いに逆（P = -Q）なら無限遠点
-        BigNum<N> neg_y = mod_sub(p, Q.y, p);
+        // PとQがy=0で対称（P = -Q）なら加算結果は無限遠点となる。
+        // -Qのy座標 = m - Qy mod m
+        BigNum<N> neg_y = mod_sub(m, Q.y, m);
         if (compare<N>(P.y.digits.data(), neg_y.digits.data()) == 0 || is_zero(P.y)) {
             return {BigNum<N>(), BigNum<N>(), true};
         }
-        // 点倍算 (P + P)
+
+        // P + P(点倍算)
         // lambda = (3x^2 + a) / 2y
         BigNum<N> three{}, two{};
         three.digits[0] = 3; two.digits[0] = 2;
 
-        BigNum<N> num = mod_add(mod_mul(mod_mul(P.x, P.x, p), three, p), a, p);
-        BigNum<N> den = modinv(mod_mul(P.y, two, p), p);
-        BigNum<N> lambda = mod_mul(num, den, p);
+        BigNum<N> num = mod_add(mod_mul(mod_mul(P.x, P.x, m), three, m), a, m);
+        BigNum<N> den = modinv(mod_mul(P.y, two, m), m);
+        BigNum<N> lambda = mod_mul(num, den, m);
 
-        BigNum<N> x3 = mod_sub(mod_sub(mod_mul(lambda, lambda, p), P.x, p), P.x, p);
-        BigNum<N> y3 = mod_sub(mod_mul(lambda, mod_sub(P.x, x3, p), p), P.y, p);
+        // x3 = lambda^2 - x1 - x2
+        // y3 = lambda * (x1 - x3) - y1
+        BigNum<N> x3 = mod_sub(mod_sub(mod_mul(lambda, lambda, m), P.x, m), P.x, m);
+        BigNum<N> y3 = mod_sub(mod_mul(lambda, mod_sub(P.x, x3, m), m), P.y, m);
         return {x3, y3, false};
     } else {
         // 通常の加算
         // lambda = (y2 - y1) / (x2 - x1)
-        BigNum<N> num = mod_sub(Q.y, P.y, p);
-        BigNum<N> den = modinv(mod_sub(Q.x, P.x, p), p);
-        BigNum<N> lambda = mod_mul(num, den, p);
+        BigNum<N> num = mod_sub(Q.y, P.y, m);
+        BigNum<N> den = modinv(mod_sub(Q.x, P.x, m), m);
+        BigNum<N> lambda = mod_mul(num, den, m);
 
-        BigNum<N> x3 = mod_sub(mod_sub(mod_mul(lambda, lambda, p), P.x, p), Q.x, p);
-        BigNum<N> y3 = mod_sub(mod_mul(lambda, mod_sub(P.x, x3, p), p), P.y, p);
+        // x3 = lambda^2 - x1 - x2
+        // y3 = lambda * (x1 - x3) - y1
+        BigNum<N> x3 = mod_sub(mod_sub(mod_mul(lambda, lambda, m), P.x, m), Q.x, m);
+        BigNum<N> y3 = mod_sub(mod_mul(lambda, mod_sub(P.x, x3, m), m), P.y, m);
         return {x3, y3, false};
     }
 }
 
-// スカラー倍 (k * P) - バイナリ法（Double-and-Add）
+// スカラー倍 (k * P)
+// バイナリ法で実装
 template <size_t N>
 ECPoint<N> ec_mul(BigNum<N> k, ECPoint<N> P, const BigNum<N>& a, const BigNum<N>& p) {
-    ECPoint<N> result = {BigNum<N>(), BigNum<N>(), true}; // 無限遠点で初期化
+    // 初期化は無限遠点
+    ECPoint<N> result = {BigNum<N>(), BigNum<N>(), true};
     ECPoint<N> base = P;
 
     while (!is_zero(k)) {
@@ -510,84 +526,130 @@ struct ECDSASignature {
     BigNum<N> r, s;
 };
 
-// 署名生成
 template <size_t N>
-ECDSASignature<N> ecdsa_sign(const BigNum<N>& msg_hash, const BigNum<N>& private_key, 
-                             const BigNum<N>& n, const BigNum<N>& a, const BigNum<N>& p, 
-                             const ECPoint<N>& G) {
-    // 実際にはセキュアな乱数生成器が必要ですが、ここではテスト用に固定値や簡易乱数で代用を検討してください
-    // 本来はループ内で r != 0 かつ s != 0 になるまで k を選び直します
-    
-    // テスト用の一次的な k (本来は 0 < k < n)
+BigNum<N> generate_k(const BigNum<N>& n) {
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<uint64_t> dist;
+
+    // 1. nが何ワード（uint64_tいくつ分）あるか計算する
+    // bit_length / 64 を切り上げれば、有効な配列サイズがわかる
+    int n_bits = bit_length_uint64(n.digits.data(), N);
+    size_t active_words = (n_bits + 63) / 64; 
+
     BigNum<N> k;
-    k.digits[0] = 0x12345678; // 簡易的な例
+    while (true) {
+        k.digits.fill(0); // 常に 0 で初期化
 
-    // 1. R = k * G
-    ECPoint<N> R = ec_mul(k, G, a, p);
+        // 2. nのワード数分だけランダムに埋める
+        for (size_t i = 0; i < active_words; ++i) {
+            k.digits[i] = dist(gen);
+        }
+
+        // 3. 0 < k < n かチェック
+        bool all_zero = true;
+        for (size_t i = 0; i < active_words; ++i) if (k.digits[i] != 0) all_zero = false;
+        if (all_zero) continue;
+
+        if (compare<N>(k.digits.data(), n.digits.data()) < 0) {
+            break; 
+        }
+    }
+    return k;
+}
+
+// 署名生成(SEC1参照https://www.secg.org/sec1-v2.pdf)
+template <size_t N>
+ECDSASignature<N> ecdsa_sign(const BigNum<N>& msg_hash, const BigNum<N>& private_key, const BigNum<N>& n, const BigNum<N>& a, const BigNum<N>& m, const ECPoint<N>& G) {
+    // 一時的な秘密鍵k、公開鍵Rを生成
+    // 0 < k < nとなるような乱数を生成(範囲で使うのは法mではなく、位数n。)
+    BigNum<N> k;
+    k = generate_k(n);
+
+    // R = k * G
+    ECPoint<N> R = ec_mul(k, G, a, m);
     
-    // 2. r = R.x % n
-    BigNum<N> r = mod_mul(R.x, BigNum<N>{{1}}, n); // mod_mulを使って n で割った余りを得る
-    if (is_zero(r)) return ecdsa_sign(msg_hash, private_key, n, a, p, G); // 再試行
+    // 署名の一片r = R.x % n
+    // mod_mulを使って n で割った余りを得る
+    BigNum<N> r = mod_mul(R.x, BigNum<N>{{1}}, n);
+    
+    // r = 0なら再試行
+    if (is_zero(r)){
+        return ecdsa_sign(msg_hash, private_key, n, a, m, G);
+    }
 
-    // 3. s = k^-1 * (msg_hash + r * private_key) % n
+    // s = k^-1 * (msg_hash + r * private_key) % n
+    // 法mではなく、位数nで剰余をとる。
     BigNum<N> k_inv = modinv(k, n);
     BigNum<N> r_d = mod_mul(r, private_key, n);
     BigNum<N> e_rd = mod_add(msg_hash, r_d, n);
     BigNum<N> s = mod_mul(k_inv, e_rd, n);
 
-    if (is_zero(s)) return ecdsa_sign(msg_hash, private_key, n, a, p, G); // 再試行
+    // s = 0なら再試行
+    if (is_zero(s)){
+        return ecdsa_sign(msg_hash, private_key, n, a, m, G);
+    }
 
     return {r, s};
 }
 
 // 署名検証
+// 署名 s = k^-1 * (msg_hash + r * private_key)
+// sk = msg_hash + r * private_key
+// k = s^-1 *msg_hash + s^-1 * r + private_key
+// k = u1 + u2 * private_key
+// kG = u1G + u2G * private_key
+// kG = u1G + u2Q
+// となるため、u1G + u2Gのx座標が署名sと一致すればよい。
 template <size_t N>
-bool ecdsa_verify(const BigNum<N>& msg_hash, const ECDSASignature<N>& sig, 
-                  const ECPoint<N>& public_key, const BigNum<N>& n, 
-                  const BigNum<N>& a, const BigNum<N>& p, const ECPoint<N>& G) {
+bool ecdsa_verify(const BigNum<N>& msg_hash, const ECDSASignature<N>& sig, const ECPoint<N>& public_key, const BigNum<N>& n, const BigNum<N>& a, const BigNum<N>& m, const ECPoint<N>& G) {
     // 0 < r < n, 0 < s < n のチェックが必要
     if (is_zero(sig.r) || is_zero(sig.s)) return false;
 
-    // 1. w = s^-1 % n
+    // w = s^-1 % n
     BigNum<N> w = modinv(sig.s, n);
 
-    // 2. u1 = (msg_hash * w) % n, u2 = (r * w) % n
+    // u1 = (msg_hash * s^-1) % n
+    // u2 = (r * s^-1) % n
     BigNum<N> u1 = mod_mul(msg_hash, w, n);
     BigNum<N> u2 = mod_mul(sig.r, w, n);
 
-    // 3. X = u1*G + u2*Q
-    ECPoint<N> pt1 = ec_mul(u1, G, a, p);
-    ECPoint<N> pt2 = ec_mul(u2, public_key, a, p);
-    ECPoint<N> X = ec_add(pt1, pt2, a, p);
+    // X = u1*G + u2*Q
+    ECPoint<N> pt1 = ec_mul(u1, G, a, m);
+    ECPoint<N> pt2 = ec_mul(u2, public_key, a, m);
+    ECPoint<N> X = ec_add(pt1, pt2, a, m);
 
-    if (X.is_infinity) return false;
+    if (X.is_infinity){
+        return false;
+    }
 
-    // 4. v = X.x % n. v == r なら正当
+    // Xのx座標 mod n をvとして、v = rなら検証成功
     BigNum<N> v = mod_mul(X.x, BigNum<N>{{1}}, n);
     return (compare<N>(v.digits.data(), sig.r.digits.data()) == 0);
 }
 
 
-// 高速化せず愚直にECDSA署名を実装すると通常の100倍くらい時間がかかる。
 int main() {
-    constexpr size_t N = 64;
+    constexpr size_t N = 8;
     BigNum<N> a, b, p, k, g_x, g_y;
     ECPoint<N> G = {g_x, g_y, false};
 
     std::cout << "\n--- ECDSA署名生成 ---" << std::endl;
     auto ecdsa_sign_start = std::chrono::high_resolution_clock::now();
 
-    // p = FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE FFFFFC2F
-    assign_from_bitstring(p, htob("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F"));
-    assign_from_bitstring(a, htob("00")); // a=0
-    // G = (79BE667E F9DCBBAC 55A06295 CE870B07 029BFCDB 2DCE28D9 59F2815B 16F81798, ...)
-    assign_from_bitstring(g_x, htob("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798"));
-    assign_from_bitstring(g_y, htob("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8"));
+    //P-256(secp256r1)の各種パラメータセット
+    // p
+    assign_from_bitstring(p, htob("FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF"));
+    // a = -3
+    assign_from_bitstring(a, htob("FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC"));
+    // Gx,Gy
+    assign_from_bitstring(g_x, htob("6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296"));
+    assign_from_bitstring(g_y, htob("4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5"));
     G = {g_x, g_y, false};
 
     BigNum<N> n, d, msg, priv_key;
-    // secp256k1 の n (オーダー)
-    assign_from_bitstring(n, htob("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141"));
+    // n
+    assign_from_bitstring(n, htob("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551"));
 
     // 1. 秘密鍵 d と公開鍵 Q = d*G の作成
     assign_from_bitstring(priv_key, htob("DEBDB65664565454564564564564564564564564564564564564564564564564")); 
@@ -611,7 +673,7 @@ int main() {
     auto ecdsa_verify_start = std::chrono::high_resolution_clock::now();
     std::cout << "ECDSA署名検証" << std::endl;
     bool is_valid = ecdsa_verify(msg, sig, Q, n, a, p, G);
-    std::cout << "Verify: " << (is_valid ? "SUCCESS" : "FAILED") << std::endl;
+    std::cout << "Verify: " << (is_valid ? "署名一致" : "署名不一致") << std::endl;
 
     
     auto ecdsa_verify_end = std::chrono::high_resolution_clock::now();
